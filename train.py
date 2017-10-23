@@ -63,22 +63,22 @@ def train(model, config, session=None):
                 iteration = (epoch-1)*dataset_length + batch_index
 
                 # run the discriminator trainer.
-                for _ in range(config.discriminator_update_ratio):
-                    zs = _sample_z(config.batch_size, model.z_size)
-                    _, d_loss = session.run(
-                        [update_D, model.d_loss],
-                        feed_dict={
-                            model.z_in: zs,
-                            model.image_in: xs
-                        }
-                    )
+                zs = _sample_z(config.batch_size, model.z_size)
+                _, d_loss = session.run(
+                    [update_D, model.d_loss],
+                    feed_dict={
+                        model.z_in: zs,
+                        model.image_in: xs
+                    }
+                )
 
                 # run the generator trainer.
-                zs = _sample_z(config.batch_size, model.z_size)
-                _, g_loss = session.run(
-                    [update_G, model.g_loss],
-                    feed_dict={model.z_in: zs}
-                )
+                for _ in range(config.generator_update_ratio):
+                    zs = _sample_z(config.batch_size, model.z_size)
+                    _, g_loss = session.run(
+                        [update_G, model.g_loss],
+                        feed_dict={model.z_in: zs}
+                    )
 
                 dataset_stream.set_description((
                     'epoch: {epoch}/{epochs} | '

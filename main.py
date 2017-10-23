@@ -46,8 +46,8 @@ flags.DEFINE_integer(
     'checkpoint_interval', 1000, 'number of batches per saving the model'
 )
 flags.DEFINE_integer(
-    'discriminator_update_ratio', 2,
-    'number of updates for discriminator parameters per generator updates'
+    'generator_update_ratio', 2,
+    'number of updates for generator parameters per discriminator updates'
 )
 
 flags.DEFINE_bool('test', False, 'flag defining whether it is in test mode')
