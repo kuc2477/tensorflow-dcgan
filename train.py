@@ -1,11 +1,30 @@
-import os.path
 import numpy as np
 import tensorflow as tf
+from tqdm import tqdm
+from data import DATASETS, DATASET_LENGTH_GETTERS
 import utils
-from .data import DATASETS
 
 
-def train(model, config, sess=None):
+def _sample_z(sample_size, z_size):
+    return np.random\
+        .uniform(-1., 1., size=[sample_size, z_size])\
+        .astype(np.float32)
+
+
+def train(model, config, session=None):
+    # define session if needed.
+    session = session or tf.Session()
+
+    # define summaries.
+    summary_writer = tf.summary.FileWriter(config.log_dir, session.graph)
+    image_summary = tf.summary.image(
+        'generated images', model.G, max_outputs=8
+    )
+    loss_summaries = tf.summary.merge([
+        tf.summary.scalar('discriminator loss', model.d_loss),
+        tf.summary.scalar('generator loss', model.g_loss),
+    ])
+
     # define optimizers
     D_trainer = tf.train.AdamOptimizer(
         learning_rate=config.learning_rate,
@@ -22,73 +41,84 @@ def train(model, config, sess=None):
     update_D = D_trainer.apply_gradients(d_grads)
     update_G = G_trainer.apply_gradients(g_grads)
 
-    # prepare training data and saver
-    dataset = DATASETS[config.dataset](config.batch_size)
-    saver = tf.train.Saver()
-
-    # z sampling function
-    def _sample_z(cfg):
-        return np.random.uniform(
-            -1., 1., size=[cfg.batch_size, cfg.z_size]
-        ).astype(np.float32)
-
     # main training session context
-    with sess or tf.Session() as sess:
-        try:
-            sess.run(tf.initialize_all_varaibles())
-        except:
-            sess.run(tf.global_variables_initializer())
+    with session:
+        if config.resume:
+            epoch_start = (
+                utils.load_checkpoint(session, model, config)
+                // DATASET_LENGTH_GETTERS[config.dataset]()
+            ) + 1
 
-        for i in range(config.iterations):
-            # sample z prepare real images
-            zs = _sample_z(config)
-            xs = next(dataset)
-            # run discriminator trainer
-            _, d_loss = sess.run(
-                [update_D, model.d_loss],
-                feed_dict={
-                    model.z_in: zs,
-                    model.image_in: xs
-                }
-            )
+        else:
+            epoch_start = 1
+            session.run(tf.global_variables_initializer())
 
-            for _ in range(config.generator_update_ratio):
-                # run generator trainer
-                zs = _sample_z(config)
-                _, g_loss = sess.run(
+        for epoch in range(epoch_start, config.epochs+1):
+            dataset = DATASETS[config.dataset](config.batch_size)
+            dataset_length = DATASET_LENGTH_GETTERS[config.dataset]()
+            dataset_stream = tqdm(enumerate(dataset, 1))
+
+            for batch_index, xs in dataset_stream:
+                # where are we?
+                iteration = (epoch-1)*dataset_length + batch_index
+
+                # run the discriminator trainer.
+                for _ in range(config.discriminator_update_ratio):
+                    zs = _sample_z(config.batch_size, model.z_size)
+                    _, d_loss = session.run(
+                        [update_D, model.d_loss],
+                        feed_dict={
+                            model.z_in: zs,
+                            model.image_in: xs
+                        }
+                    )
+
+                # run the generator trainer.
+                zs = _sample_z(config.batch_size, model.z_size)
+                _, g_loss = session.run(
                     [update_G, model.g_loss],
                     feed_dict={model.z_in: zs}
                 )
 
-            if i % config.log_for_every == 0:
-                # log current training process status
-                print('Generator Loss: {} / Discriminator Loss: {}'.format(
-                    g_loss, d_loss
-                ))
-                if not os.path.exists(config.sample_dir):
-                    os.makedirs(config.sample_dir, exist_ok=True)
-
-                # generate images from the sampled z
-                z_sampled = _sample_z(config)
-                x_generated = sess.run(
-                    model.G, feed_dict={model.z_in: z_sampled}
-                )
-
-                utils.save_images(
-                    np.reshape(
-                        x_generated[:config.sample_size],
-                        [config.sample_size,
-                         config.image_size,
-                         config.image_size]
+                dataset_stream.set_description((
+                    'epoch: {epoch}/{epochs} | '
+                    'progress: [{trained}/{total}] ({progress:.0f}%) | '
+                    'g loss: {g_loss:.3f} | '
+                    'd loss: {d_loss:.3f}'
+                ).format(
+                    epoch=epoch,
+                    epochs=config.epochs,
+                    trained=batch_index*config.batch_size,
+                    total=dataset_length,
+                    progress=(
+                        100.
+                        * batch_index
+                        * config.batch_size
+                        / dataset_length
                     ),
-                    [config.sample_size // 6, 6],
-                    '{}/fig{}.png'.format(config.sample_dir, i)
-                )
+                    g_loss=g_loss,
+                    d_loss=d_loss,
+                ))
 
-            # save the model
-            if i % config.save_for_every == 0 and i != 0:
-                if not os.path.exists(config.model_dir):
-                    os.makedirs(config.model_dir, exist_ok=True)
-                path = '{}/model-{}.cptk'.format(config.model_dir, i)
-                saver.save(sess, path)
-                print('saved model to {}'.format(path))
+                # log the generated samples.
+                if iteration % config.image_log_interval == 0:
+                    zs = _sample_z(config.sample_size, model.z_size)
+                    summary_writer.add_summary(session.run(
+                        image_summary, feed_dict={
+                            model.z_in: zs
+                        }
+                    ), iteration)
+
+                # log the losses.
+                if iteration % config.loss_log_interval == 0:
+                    zs = _sample_z(config.batch_size, model.z_size)
+                    summary_writer.add_summary(session.run(
+                        loss_summaries, feed_dict={
+                            model.z_in: zs,
+                            model.image_in: xs
+                        }
+                    ), iteration)
+
+                # save the model.
+                if iteration % config.checkpoint_interval == 0:
+                    utils.save_checkpoint(session, model, iteration, config)
